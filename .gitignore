@@ -24,3 +24,4 @@ Desktop.ini
 #=== Logs and temp ===
 *.log
 *.tmp
+deltaConfig.json
