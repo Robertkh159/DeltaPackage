@@ -165,8 +165,22 @@ process {
 
     #--- Dry-run preview -------------------------------------------------
     if ($PSBoundParameters.ContainsKey('WhatIf')) {
-        Write-Host "[Preview] Would copy $($staticFiles.Count) static files"
-        Write-Host "[Preview] Would build $($csFiles.Count) C# projects"
+        Write-Host "[Preview] Static/resource files to copy:"
+        if ($staticFiles.Count -gt 0) {
+            $staticFiles | ForEach-Object { Write-Host "  • $($_.Path)" }
+        }
+        else {
+            Write-Host "  (none)"
+        }
+
+        Write-Host "[Preview] C# files changed (will trigger builds):"
+        if ($csFiles.Count -gt 0) {
+            $csFiles | ForEach-Object { Write-Host "  • $($_.Path)" }
+        }
+        else {
+            Write-Host "  (none)"
+        }
+
         return
     }
 
