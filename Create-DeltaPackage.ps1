@@ -11,21 +11,38 @@
   ASP.NET MVC/WebForms targeting .NET Framework 4.x.
 #>
 
-[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Low', DefaultParameterSetName='Delta')]
+[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Low')]
 param(
-    [Parameter(Mandatory=$true, Position=0, HelpMessage='Path to the Git repository')]
-    [ValidateScript({ Test-Path $_ -PathType 'Container' })]
+    [Parameter(Position=0, HelpMessage='Path to the Git repository')]
     [string]$RepoPath,
 
     [Parameter(Position=1, HelpMessage='Number of commits to include (1 = last commit)')]
     [ValidateRange(1,100)]
-    [int]$CommitCount = 1,
+    [int]$CommitCount,
 
     [Parameter(Position=2, HelpMessage='Root folder for the delta package')]
-    [string]$PackageRoot = (Join-Path $env:TEMP "DeployPackage-$(Get-Date -Format 'yyyyMMdd-HHmmss')")
+    [string]$PackageRoot
 )
 
 begin {
+    # If run without args, prompt for each
+    if (-not $RepoPath) {
+        do {
+            $RepoPath = Read-Host "Full path to the Git repo"
+        } until (Test-Path $RepoPath -PathType Container)
+    }
+
+    if (-not $CommitCount) {
+        do {
+            $input = Read-Host "Number of commits to include (e.g. 1 for last commit)"
+        } until ([int]::TryParse($input, [ref]$CommitCount) -and $CommitCount -ge 1)
+    }
+
+    if (-not $PackageRoot) {
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $PackageRoot = Join-Path $env:TEMP "DeployPackage-$stamp"
+    }
+
     # Clean up old deploy packages (>7 days)
     Get-ChildItem -Path $env:TEMP -Filter 'DeployPackage-*' -Directory -ErrorAction SilentlyContinue |
       Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
@@ -55,41 +72,53 @@ begin {
 
 process {
     Set-Location -Path $RepoPath
-    $range     = "HEAD~$CommitCount..HEAD"
-    Write-Verbose "Diff range: $range"
 
-    # Run git diff
-    $gitOutput = git diff --name-status $range 2>&1
-    if ($LASTEXITCODE -ne 0) { Throw "git diff failed: $gitOutput" }
+    # Build range and show commits + diffstat
+    $range = "HEAD~$CommitCount..HEAD"
+    Write-Host "`n📦 Building delta package for range $range`n"
+
+    # List the commits
+    $commits = git log --pretty=format:'%h %s' -n $CommitCount $range
+    Write-Host "Commits to include:"
+    $commits.Split("`n") | ForEach-Object { Write-Host "  - $_" }
+
+    # Show quick diffstat
+    $summary = git diff --shortstat $range
+    Write-Host "`nChange summary: $summary`n"
 
     # Parse diff
+    $gitOutput = git diff --name-status $range
     $diff = $gitOutput | ForEach-Object {
         $parts = $_ -split "`t"
         [PSCustomObject]@{ Status = $parts[0]; Path = $parts[1] -replace '/', '\' }
     } | Where-Object { $_.Status -notmatch '^D' }
 
-    # Classify files
-    $staticFiles = $diff | Where-Object { $staticExt -contains ([IO.Path]::GetExtension($_.Path).ToLowerInvariant()) }
-    $csFiles     = $diff | Where-Object { $_.Path -like '*.cs' }
+    # Classify
+    $staticFiles = $diff | Where-Object {
+        $staticExt -contains ([IO.Path]::GetExtension($_.Path).ToLowerInvariant())
+    }
+    $csFiles = $diff | Where-Object { $_.Path -like '*.cs' }
 
-    # Preview mode
+    # Dry-run preview
     if ($PSBoundParameters.ContainsKey('WhatIf')) {
-        Write-Host "[Preview] Would copy static files: $($staticFiles.Count)"
-        Write-Host "[Preview] Would build C# projects: $($csFiles.Count)"
+        Write-Host "[Preview] Would copy $($staticFiles.Count) static files"
+        Write-Host "[Preview] Would build $($csFiles.Count) C# projects"
         return
     }
 
     # Copy static files
+    Write-Host "Copying static/resource files..."
     $i = 0; $total = $staticFiles.Count
     foreach ($f in $staticFiles) {
-        $i++ ; Write-Progress -Activity 'Copying static files' -Status $f.Path -PercentComplete ([int]($i/$total*100))
+        $i++
+        Write-Progress -Activity 'Copying static files' -Status $f.Path -PercentComplete ([int]($i/$total*100))
         $dest = Join-Path $PackageRoot $f.Path
         New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
         Copy-Item -LiteralPath $f.Path -Destination $dest -Force
     }
     Write-Progress -Activity 'Copying static files' -Completed
 
-    # Identify C# projects
+    # Identify projects
     $projSet = [System.Collections.Generic.HashSet[string]]::new()
     foreach ($cs in $csFiles) {
         $dir = Split-Path $cs.Path
@@ -101,8 +130,8 @@ process {
     }
 
     if ($projSet.Count -eq 0) {
-        Write-Host "No C# changes detected - only static files copied."
-        Write-Host "Done -> $PackageRoot"
+        Write-Host "No C# changes detected – only static files copied."
+        Write-Host "`n✅ Done -> $PackageRoot"
         return
     }
 
@@ -111,7 +140,8 @@ process {
     $tempBuild = Join-Path $env:TEMP "DeltaBuild-$stamp"
     New-Item -ItemType Directory -Path $tempBuild -Force | Out-Null
 
-    # Build projects
+    # Build projects (parallel on PS7+)
+    Write-Host "`nBuilding projects..."
     if ($PSVersionTable.PSVersion.Major -ge 7) {
         $projSet | ForEach-Object -Parallel {
             $projPath = $_
@@ -119,14 +149,12 @@ process {
             $outDir   = Join-Path $using:tempBuild $projName
             New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-            $isSdk = Select-String -Path $projPath -Pattern '<TargetFramework' -Quiet
-            if ($isSdk) {
+            if (Select-String -Path $projPath -Pattern '<TargetFramework' -Quiet) {
                 dotnet publish $projPath -c Release -o $outDir --nologo
             } else {
                 dotnet msbuild $projPath /t:Build /p:Configuration=Release /p:OutDir="$outDir\" /nologo
             }
 
-            # Copy DLL
             $dll = Get-ChildItem -Path $outDir -Filter "$projName.dll" -Recurse | Select-Object -First 1
             if ($dll) {
                 $projRel = (Split-Path $projPath -Parent) -replace [regex]::Escape($using:RepoPath), ''
@@ -141,19 +169,16 @@ process {
     } else {
         foreach ($projPath in $projSet) {
             $projName = [IO.Path]::GetFileNameWithoutExtension($projPath)
-            Write-Verbose "Building $projName"
-
+            Write-Host " • $projName"
             $outDir = Join-Path $tempBuild $projName
             New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-            $isSdk  = Select-String -Path $projPath -Pattern '<TargetFramework' -Quiet
 
-            if ($isSdk) {
+            if (Select-String -Path $projPath -Pattern '<TargetFramework' -Quiet) {
                 dotnet publish $projPath -c Release -o $outDir --nologo
             } else {
                 dotnet msbuild $projPath /t:Build /p:Configuration=Release /p:OutDir="$outDir\" /nologo
             }
 
-            # Copy DLL
             $dll = Get-ChildItem -Path $outDir -Filter "$projName.dll" -Recurse | Select-Object -First 1
             if ($dll) {
                 $projRel = (Split-Path $projPath -Parent) -replace [regex]::Escape($RepoPath), ''
@@ -173,19 +198,16 @@ process {
     if ($PSCmdlet.ShouldProcess($PackageRoot, "Archive to $zipPath")) {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [IO.Compression.ZipFile]::CreateFromDirectory($PackageRoot, $zipPath)
-        Write-Host "🗜️  Archive created at $zipPath"
     }
 
     # Cleanup intermediate build
-    if (Test-Path $tempBuild) {
-        Remove-Item $tempBuild -Recurse -Force
-    }
+    if (Test-Path $tempBuild) { Remove-Item $tempBuild -Recurse -Force }
 
-    # Summary
-    [PSCustomObject]@{
-        CopiedStaticFiles = $staticFiles.Count
-        BuiltProjects      = $projSet.Count
-        PackageFolder      = $PackageRoot
-        Archive            = $zipPath
-    } | Format-Table -AutoSize
+    # Final summary
+    Write-Host "`n===== Summary ====="
+    Write-Host " Static files copied: $($staticFiles.Count)"
+    Write-Host " Projects built:      $($projSet.Count)"
+    Write-Host " Package folder:      $PackageRoot"
+    Write-Host " Archive created at:  $zipPath"
+    Write-Host "=====================`n"
 }
