@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "PowerShell",
+      "request": "launch",
+      "name": "Debug Delta-Deploy Script",
+      // Path to your script; you can also use "${file}" to debug the currently active file
+      "script": "${workspaceFolder}/Create-DeltaPackage.ps1",
+      // Pass parameters here:
+      "args": [
+        "-RepoPath", "C:\\Projects\\tzorashop.com\\code",
+        "-CommitCount", "3",
+        "-PackageRoot", "C:\\Temp\\DeployPackage"
+      ],
+      // Optional: start in the script’s folder
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
