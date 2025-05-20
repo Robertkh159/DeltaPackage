@@ -35,7 +35,7 @@ if (-not $CommitOrRange) {
 
 #-- 3. Prepare output folder ---------------------------------------------------
 if (-not $PackageRoot) {
-    $stamp       = Get-Date -Format "yyyyMMdd-HHmmss"
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $PackageRoot = Join-Path $env:TEMP "DeployPackage-$stamp"
 }
 New-Item -ItemType Directory -Path $PackageRoot -Force | Out-Null
@@ -51,13 +51,27 @@ $diff = git diff --name-status $CommitOrRange | ForEach-Object {
     }
 } | Where-Object { $_.Status -notmatch '^D' }   # ignore deletions
 
-$staticExt = '.js','.css','.html','.htm','.cshtml','.config','.json','.xml',
-             '.png','.jpg','.jpeg','.gif','.svg','.txt'
+$staticExt = @(
+    '.js',
+    '.css',
+    '.html',
+    '.htm',
+    '.cshtml',
+    '.config',
+    '.json',
+    '.xml',
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.gif',
+    '.svg',
+    '.txt'
+)
 
 $staticFiles = $diff | Where-Object {
     $staticExt -contains ([IO.Path]::GetExtension($_.Path))
 }
-$csFiles     = $diff | Where-Object { $_.Path -like '*.cs' }
+$csFiles = $diff | Where-Object { $_.Path -like '*.cs' }
 
 #-- 5. Copy static / resource files -------------------------------------------
 foreach ($f in $staticFiles) {
@@ -73,60 +87,56 @@ foreach ($cs in $csFiles) {
     $searchDir = Split-Path $cs.Path
     $proj = $null
 
-    # Walk up until we hit a .csproj
     do {
         $proj = Get-ChildItem $searchDir -Filter *.csproj -ErrorAction SilentlyContinue |
-                Select-Object -First 1
+        Select-Object -First 1
         $searchDir = Split-Path $searchDir -Parent
     } until ($proj -or -not $searchDir)
 
-    if ($proj) { $projSet.Add($proj.FullName) | Out-Null }
+    if ($proj) { 
+        $projSet.Add($proj.FullName) | Out-Null 
+    }
+
 }
 
 # Nothing to build? We're done.
 if ($projSet.Count -eq 0) {
-    Write-Host "No .cs changes detected – static files copied only."
-    Write-Host "Done → $PackageRoot"
-    exit
+    Write-Host "No .cs changes detected - static files copied only."
+    Write-Host "Done -> $PackageRoot"
 }
 
-#-- 7. Build only the touched projects & collect DLLs --------------------------
 $tempBuild = Join-Path $env:TEMP "DeltaBuild-$stamp"
 New-Item $tempBuild -ItemType Directory -Force | Out-Null
 
 foreach ($projPath in $projSet) {
     $projName = [IO.Path]::GetFileNameWithoutExtension($projPath)
-    $outDir   = Join-Path $tempBuild $projName
+    $outDir = Join-Path $tempBuild $projName
     New-Item $outDir -ItemType Directory -Force | Out-Null
 
-    Write-Host "🔧 Building $projName ..."
+    Write-Host "Building $projName ..."
 
-    $isSdk = Select-String -Path $projPath -Pattern '<TargetFramework' -Quiet
+    $isSdk = Select-String -Path $projPath -Pattern "<TargetFramework" -Quiet
 
     if ($isSdk) {
         dotnet publish $projPath -c Release -o $outDir --nologo
     }
     else {
-        msbuild  $projPath /t:Build /p:Configuration=Release /p:OutDir="$outDir\" /nologo
+         dotnet msbuild $projPath /t:Build /p:Configuration=Release /p:OutDir="$outDir\" /nologo
     }
 
     # Grab the primary DLL (ProjectName.dll)
-    $dll = Get-ChildItem $outDir -Filter "$projName.dll" -Recurse |
-           Select-Object -First 1
+    $dll = Get-ChildItem $outDir -Filter "$projName.dll" -Recurse | Select-Object -First 1
     if (-not $dll) {
-        Write-Warning "⚠️  Did not find $projName.dll after build."
+        Write-Warning "Did not find $projName.dll after build."
         continue
     }
 
-    # Mirror original relative path → place DLL under bin\
     $projRel = (Split-Path $projPath -Parent) -replace [regex]::Escape($RepoPath), ''
-    $binDest = Join-Path $PackageRoot (Join-Path $projRel.TrimStart('\') 'bin')
+    $trimmedRel = $projRel.TrimStart("\")
+    $binDest = Join-Path $PackageRoot (Join-Path $trimmedRel "bin")
     New-Item $binDest -ItemType Directory -Force | Out-Null
     Copy-Item $dll.FullName $binDest -Force
+
 }
 
-Write-Host "Package complete: $PackageRoot"
-
-# Optional: create a .zip side-by-side
-# Compress-Archive -Path "$PackageRoot\*" -DestinationPath "$PackageRoot.zip" -Force
-# Write-Host "Zip created → $PackageRoot.zip"
+Write-Host "Package complete: $PackageRoot "
